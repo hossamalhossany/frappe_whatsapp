@@ -155,6 +155,8 @@ class TestWebhookHelpers(IntegrationTestCase):
 class TestWebhookEndpoint(IntegrationTestCase):
     """Tests for the webhook endpoint."""
 
+    APP_SECRET = "ep_app_secret"
+
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -175,12 +177,14 @@ class TestWebhookEndpoint(IntegrationTestCase):
             account.insert(ignore_permissions=True)
             from frappe.utils.password import set_encrypted_password
             set_encrypted_password("WhatsApp Account", account.name, "ep_token", "token")
+            set_encrypted_password("WhatsApp Account", account.name, cls.APP_SECRET, "app_secret")
             frappe.db.commit()  # nosemgrep: frappe-manual-commit -- test fixture must be visible to later queries
 
     def setUp(self):
         # Set password within each test's transaction scope
         from frappe.utils.password import set_encrypted_password
         set_encrypted_password("WhatsApp Account", "Test WA Webhook EP Account", "ep_token", "token")
+        set_encrypted_password("WhatsApp Account", "Test WA Webhook EP Account", self.APP_SECRET, "app_secret")
         # Clear ALL defaults then set ours (db.set_value bypasses on_update hooks)
         frappe.db.sql("UPDATE `tabWhatsApp Account` SET is_default_outgoing=0, is_default_incoming=0")
         frappe.db.set_value("WhatsApp Account", "Test WA Webhook EP Account", {
@@ -203,6 +207,16 @@ class TestWebhookEndpoint(IntegrationTestCase):
         mock_request.method = method
         return mock_request
 
+    def _prepare_signed_request(self, mock_request, payload):
+        """Give the endpoint raw JSON and the signature Meta would send."""
+        import hashlib
+        import hmac
+
+        raw_body = json.dumps(payload).encode("utf-8")
+        digest = hmac.new(self.APP_SECRET.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+        mock_request.get_data.return_value = raw_body
+        mock_request.headers = {"X-Hub-Signature-256": f"sha256={digest}"}
+
     def test_webhook_get_verification(self):
         """Test GET webhook verification."""
         mock_request = self._make_mock_request("GET")
@@ -212,6 +226,7 @@ class TestWebhookEndpoint(IntegrationTestCase):
             "hub.mode": "subscribe",
         })
 
+        mock_request.headers = {}
         with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
             from frappe_whatsapp.utils.webhook import webhook
             response = webhook()
@@ -223,12 +238,68 @@ class TestWebhookEndpoint(IntegrationTestCase):
         frappe.local.form_dict = frappe._dict({
             "hub.challenge": "test_challenge",
             "hub.verify_token": "wrong_token",
+            "hub.mode": "subscribe",
         })
 
         with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
             from frappe_whatsapp.utils.webhook import webhook
-            with self.assertRaises(frappe.ValidationError):
-                webhook()
+            response = webhook()
+            self.assertEqual(response.status_code, 403)
+
+    def test_webhook_post_rejects_invalid_signature(self):
+        mock_request = self._make_mock_request("POST")
+        self._prepare_signed_request(mock_request, {"object": "whatsapp_business_account"})
+        mock_request.headers["X-Hub-Signature-256"] = "sha256=" + ("0" * 64)
+
+        with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
+            from frappe_whatsapp.utils.webhook import webhook
+            response = webhook()
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_webhook_post_requires_configured_app_secret(self):
+        mock_request = self._make_mock_request("POST")
+        self._prepare_signed_request(mock_request, {"object": "whatsapp_business_account"})
+
+        with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
+            with patch("frappe_whatsapp.utils.webhook.frappe.get_all", return_value=[]):
+                from frappe_whatsapp.utils.webhook import webhook
+                response = webhook()
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_webhook_post_rejects_inactive_account(self):
+        mock_request = self._make_mock_request("POST")
+        payload = {
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "metadata": {"phone_number_id": "webhook_ep_phone_id"},
+                        "messages": [{
+                            "from": "919900112288",
+                            "id": "wamid.webhook_ep_inactive_account",
+                            "type": "text",
+                            "text": {"body": "Should not be ingested"},
+                        }],
+                    }
+                }]
+            }]
+        }
+        self._prepare_signed_request(mock_request, payload)
+        frappe.db.set_value("WhatsApp Account", "Test WA Webhook EP Account", "status", "Inactive")
+
+        try:
+            with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
+                with patch("frappe_whatsapp.utils.webhook._valid_signature", return_value=True):
+                    from frappe_whatsapp.utils.webhook import webhook
+                    response = webhook()
+        finally:
+            frappe.db.set_value("WhatsApp Account", "Test WA Webhook EP Account", "status", "Active")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(
+            frappe.db.exists("WhatsApp Message", {"message_id": "wamid.webhook_ep_inactive_account"})
+        )
 
     def test_webhook_post_text_message(self):
         """Test POST webhook with incoming text message."""
@@ -249,7 +320,7 @@ class TestWebhookEndpoint(IntegrationTestCase):
                 }]
             }]
         }
-        frappe.local.form_dict = frappe._dict(payload)
+        self._prepare_signed_request(mock_request, payload)
 
         with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
             from frappe_whatsapp.utils.webhook import webhook
@@ -285,7 +356,7 @@ class TestWebhookEndpoint(IntegrationTestCase):
                 }]
             }]
         }
-        frappe.local.form_dict = frappe._dict(payload)
+        self._prepare_signed_request(mock_request, payload)
 
         with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
             from frappe_whatsapp.utils.webhook import webhook
@@ -317,7 +388,7 @@ class TestWebhookEndpoint(IntegrationTestCase):
                 }]
             }]
         }
-        frappe.local.form_dict = frappe._dict(payload)
+        self._prepare_signed_request(mock_request, payload)
 
         with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
             from frappe_whatsapp.utils.webhook import webhook
@@ -347,7 +418,7 @@ class TestWebhookEndpoint(IntegrationTestCase):
                 }]
             }]
         }
-        frappe.local.form_dict = frappe._dict(payload)
+        self._prepare_signed_request(mock_request, payload)
 
         with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
             from frappe_whatsapp.utils.webhook import webhook
@@ -389,7 +460,7 @@ class TestWebhookEndpoint(IntegrationTestCase):
                 }]
             }]
         }
-        frappe.local.form_dict = frappe._dict(payload)
+        self._prepare_signed_request(mock_request, payload)
 
         with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
             from frappe_whatsapp.utils.webhook import webhook
@@ -441,7 +512,7 @@ class TestWebhookEndpoint(IntegrationTestCase):
                 }],
             }],
         }
-        frappe.local.form_dict = frappe._dict(payload)
+        self._prepare_signed_request(mock_request, payload)
 
         with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
             from frappe_whatsapp.utils.webhook import webhook
@@ -471,7 +542,7 @@ class TestWebhookEndpoint(IntegrationTestCase):
                 }]
             }]
         }
-        frappe.local.form_dict = frappe._dict(payload)
+        self._prepare_signed_request(mock_request, payload)
 
         with patch("frappe_whatsapp.utils.webhook.frappe.request", mock_request):
             from frappe_whatsapp.utils.webhook import webhook

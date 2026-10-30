@@ -750,6 +750,19 @@
             <div class="code-block">
                 <pre><code>https://your-site.com/api/method/frappe_whatsapp.utils.webhook.webhook</code></pre>
             </div>
+            <p>
+                Set a strong, unique <strong>Webhook Verify Token</strong> on the WhatsApp Account and enter the same value in Meta.
+                Meta's verification request must use <code>hub.mode=subscribe</code>.
+            </p>
+            <p>
+                Save the Meta application's <strong>App Secret</strong> in the account's <strong>Meta App Secret</strong> Password field;
+                it is required to verify each POST using <code>X-Hub-Signature-256</code>. Unsigned or invalidly signed POST notifications are rejected.
+                This endpoint requires SHA-256 signatures and does not accept the legacy <code>X-Hub-Signature</code> header.
+            </p>
+            <p>
+                Before enabling the Meta webhook on an existing installation, add the App Secret to every active WhatsApp Account that should receive events.
+                Active accounts without a configured secret cannot authorize POST notifications; inactive accounts are not accepted for webhook delivery.
+            </p>
             <p>Subscribe to the following webhook fields:</p>
             <ul>
                 <li><code>messages</code> - To receive incoming messages</li>

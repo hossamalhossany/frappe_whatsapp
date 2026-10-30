@@ -1,11 +1,11 @@
 """Webhook."""
 import frappe
 import json
+import hashlib
+import hmac
 import requests
-import time
 from frappe import _
 from werkzeug.wrappers import Response
-import frappe.utils
 
 from frappe_whatsapp.utils import get_whatsapp_account
 
@@ -20,6 +20,9 @@ def webhook():
 
 def get():
 	"""Get."""
+	if frappe.form_dict.get("hub.mode") != "subscribe":
+		return Response("Invalid webhook mode", status=403)
+
 	hub_challenge = frappe.form_dict.get("hub.challenge")
 	verify_token = frappe.form_dict.get("hub.verify_token")
 	webhook_verify_token = frappe.db.get_value(
@@ -28,16 +31,30 @@ def get():
 		'webhook_verify_token'
 	)
 	if not webhook_verify_token:
-		frappe.throw("No matching WhatsApp account")
+		return Response("Invalid verify token", status=403)
 
 	if frappe.form_dict.get("hub.verify_token") != webhook_verify_token:
-		frappe.throw("Verify token does not match")
+		return Response("Invalid verify token", status=403)
+	if hub_challenge is None:
+		return Response("Missing challenge", status=400)
 
 	return Response(hub_challenge, status=200)
 
 def post():
 	"""Post."""
-	data = frappe.local.form_dict
+	request = frappe.request
+	raw_body = request.get_data(cache=True)
+	signature = request.headers.get("X-Hub-Signature-256", "")
+	if not _valid_signature(raw_body, signature):
+		return Response("Invalid webhook signature", status=401)
+
+	try:
+		data = json.loads(raw_body)
+	except (TypeError, ValueError):
+		return Response("Invalid JSON payload", status=400)
+	if not isinstance(data, dict):
+		return Response("Invalid JSON payload", status=400)
+
 	frappe.get_doc({
 		"doctype": "WhatsApp Notification Log",
 		"template": "Webhook",
@@ -69,8 +86,8 @@ def post():
 	# for them by design. Gating the entire handler on `whatsapp_account`
 	# silently drops every template-status update; gate only the message-
 	# ingestion branch instead.
-	if messages and not whatsapp_account:
-		return
+	if messages and (not whatsapp_account or whatsapp_account.status != "Active"):
+		return Response("WhatsApp account is inactive or unavailable", status=403)
 
 	if messages:
 		for message in messages:
@@ -274,7 +291,34 @@ def post():
 		except KeyError:
 			changes = data["entry"]["changes"][0]
 		update_status(changes)
-	return
+	return Response("EVENT_RECEIVED", status=200)
+
+
+def _valid_signature(raw_body, signature):
+	"""Verify Meta's SHA-256 request signature against configured app secrets."""
+	if not signature.startswith("sha256="):
+		return False
+
+	supplied_digest = signature[7:]
+	if len(supplied_digest) != 64:
+		return False
+
+	# Inactive accounts must not authorize webhook deliveries.
+	for account in frappe.get_all(
+		"WhatsApp Account", filters={"status": "Active"}, pluck="name"
+	):
+		try:
+			app_secret = frappe.get_doc("WhatsApp Account", account).get_password("app_secret")
+		except Exception:
+			app_secret = None
+		if not app_secret:
+			continue
+		expected_digest = hmac.new(
+			app_secret.encode("utf-8"), raw_body, hashlib.sha256
+		).hexdigest()
+		if hmac.compare_digest(expected_digest, supplied_digest):
+			return True
+	return False
 
 def update_status(data):
 	"""Update status hook."""
