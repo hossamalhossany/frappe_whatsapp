@@ -2,12 +2,23 @@
 # For license information, please see license.txt
 
 import frappe
+import json
 from frappe import _
 from frappe.integrations.utils import make_post_request
 from frappe.model.document import Document
 
 
 class WhatsAppAccount(Document):
+	def before_insert(self):
+		if not self.webhook_verify_token:
+			self.webhook_verify_token = frappe.generate_hash(length=40)
+
+	def validate(self):
+		self.webhook_callback_url = (
+			f"{frappe.utils.get_url()}/api/method/"
+			"frappe_whatsapp.utils.webhook.webhook"
+		)
+
 	def on_update(self):
 		"""Check there is only one default of each type."""
 		self.there_must_be_only_one_default()
@@ -66,3 +77,76 @@ class WhatsAppAccount(Document):
 			f"WhatsApp app subscribed to webhooks for business_id={self.business_id}"
 		)
 		return response
+
+	@frappe.whitelist()
+	def send_template_test(self, to, parent_name, student_name, lesson_date, lesson_time):
+		"""Send a lesson_reminder test and persist it for webhook status updates."""
+		if not self.has_permission("write"):
+			frappe.throw(_("Not permitted"), frappe.PermissionError)
+		if self.status != "Active":
+			frappe.throw(_("Activate this WhatsApp Account before sending a test"))
+		for field in ("url", "version", "phone_id"):
+			if not self.get(field):
+				frappe.throw(_("{0} is required").format(self.meta.get_label(field)))
+		token = self.get_password("token")
+		if not token:
+			frappe.throw(_("Access token is required"))
+
+		to = "".join(char for char in str(to or "") if char.isdigit())
+		if not to:
+			frappe.throw(_("Enter the recipient phone number with country code"))
+		values = [parent_name, student_name, lesson_date, lesson_time]
+		if any(not str(value or "").strip() for value in values):
+			frappe.throw(_("Fill in all four lesson_reminder template values"))
+		payload = {
+			"messaging_product": "whatsapp",
+			"to": to,
+			"type": "template",
+			"template": {
+				"name": "lesson_reminder",
+				"language": {"code": "en"},
+				"components": [{
+					"type": "body",
+					"parameters": [{"type": "text", "text": str(value)} for value in values],
+				}],
+			},
+		}
+		try:
+			response = make_post_request(
+				f"{self.url.rstrip('/')}/{self.version}/{self.phone_id}/messages",
+				headers={"authorization": f"Bearer {token}", "content-type": "application/json"},
+				data=json.dumps(payload),
+			)
+			message_id = response["messages"][0]["id"]
+		except Exception:
+			integration_request = frappe.flags.get("integration_request")
+			error = {}
+			if integration_request:
+				try:
+					error = integration_request.json().get("error", {})
+				except Exception:
+					pass
+			frappe.get_doc({
+				"doctype": "WhatsApp Notification Log",
+				"template": "lesson_reminder test",
+				"meta_data": frappe.as_json(error or {"error": "Request failed; see Error Log"}),
+			}).insert(ignore_permissions=True)
+			frappe.log_error(title="WhatsApp template test failed", message=frappe.as_json(error))
+			frappe.throw(_(error.get("message") or "WhatsApp template send failed; see Error Log"))
+
+		message = frappe.get_doc({
+			"doctype": "WhatsApp Message",
+			"type": "Outgoing",
+			"to": to,
+			"message": "lesson_reminder",
+			"message_type": "Template",
+			"template": frappe.db.get_value(
+				"WhatsApp Templates", {"actual_name": "lesson_reminder", "language_code": "en"}, "name"
+			),
+			"template_parameters": frappe.as_json(values),
+			"message_id": message_id,
+			"content_type": "text",
+			"use_template": 1,
+			"whatsapp_account": self.name,
+		}).insert(ignore_permissions=True)
+		return {"name": message.name, "message_id": message_id}
