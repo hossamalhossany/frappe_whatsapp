@@ -97,6 +97,7 @@ class WhatsAppAccount(Document):
 		values = [parent_name, student_name, lesson_date, lesson_time]
 		if any(not str(value or "").strip() for value in values):
 			frappe.throw(_("Fill in all four lesson_reminder template values"))
+		parameter_names = ["parent_name", "student_name", "lesson_date", "lesson_time"]
 		payload = {
 			"messaging_product": "whatsapp",
 			"to": to,
@@ -106,7 +107,10 @@ class WhatsAppAccount(Document):
 				"language": {"code": "en"},
 				"components": [{
 					"type": "body",
-					"parameters": [{"type": "text", "text": str(value)} for value in values],
+					"parameters": [
+						{"type": "text", "parameter_name": name, "text": str(value)}
+						for name, value in zip(parameter_names, values)
+					],
 				}],
 			},
 		}
@@ -117,21 +121,44 @@ class WhatsAppAccount(Document):
 				data=json.dumps(payload),
 			)
 			message_id = response["messages"][0]["id"]
-		except Exception:
+		except Exception as exc:
 			integration_request = frappe.flags.get("integration_request")
-			error = {}
+			error = {"message": str(exc), "type": type(exc).__name__}
+			http_response = getattr(exc, "response", None)
+			if http_response is not None:
+				try:
+					response_data = http_response.json()
+					if response_data:
+						error["meta_response"] = response_data
+				except Exception:
+					response_text = getattr(http_response, "text", "")
+					if response_text:
+						error["meta_response"] = response_text[:4000]
 			if integration_request:
 				try:
-					error = integration_request.json().get("error", {})
+					response_data = integration_request.json()
+					if isinstance(response_data, dict):
+						api_error = response_data.get("error")
+						if api_error:
+							error["meta_error"] = api_error
+						elif not error.get("meta_response"):
+							error["response"] = response_data
 				except Exception:
 					pass
+			error_json = frappe.as_json(error)
+			if token:
+				error_json = error_json.replace(token, "[REDACTED]")
 			frappe.get_doc({
 				"doctype": "WhatsApp Notification Log",
 				"template": "lesson_reminder test",
-				"meta_data": frappe.as_json(error or {"error": "Request failed; see Error Log"}),
+				"meta_data": error_json,
 			}).insert(ignore_permissions=True)
-			frappe.log_error(title="WhatsApp template test failed", message=frappe.as_json(error))
-			frappe.throw(_(error.get("message") or "WhatsApp template send failed; see Error Log"))
+			frappe.log_error(title="WhatsApp template test failed", message=error_json)
+			api_error = error.get("meta_error") or error.get("meta_response") or {}
+			if isinstance(api_error, dict) and isinstance(api_error.get("error"), dict):
+				api_error = api_error["error"]
+			api_message = api_error.get("message") if isinstance(api_error, dict) else None
+			frappe.throw(_(api_message or error.get("message") or "WhatsApp template send failed; see Error Log"))
 
 		message = frappe.get_doc({
 			"doctype": "WhatsApp Message",
