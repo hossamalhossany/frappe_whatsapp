@@ -152,8 +152,15 @@ class WhatsAppAccount(Document):
 
 
 @frappe.whitelist()
-def send_template_test(account_name, to, parent_name, student_name, lesson_date, lesson_time):
+def send_template_test(account_name=None, to=None, parent_name=None, student_name=None, lesson_date=None, lesson_time=None):
 	"""Whitelisted RPC entry point for the lesson_reminder account test."""
+	# Fall back to the configured outgoing account for clients with a cached
+	# version of the form script that sends the dialog values without account_name.
+	account_name = account_name or frappe.db.get_value(
+		"WhatsApp Account", {"is_default_outgoing": 1, "status": "Active"}, "name"
+	)
+	if not account_name:
+		frappe.throw(_("Set an active default outgoing WhatsApp Account first"))
 	account = frappe.get_doc("WhatsApp Account", account_name)
 	if not account.has_permission("write"):
 		frappe.throw(_("Not permitted"), frappe.PermissionError)
