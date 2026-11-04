@@ -78,7 +78,6 @@ class WhatsAppAccount(Document):
 		)
 		return response
 
-	@frappe.whitelist()
 	def send_template_test(self, to, parent_name, student_name, lesson_date, lesson_time):
 		"""Send a lesson_reminder test and persist it for webhook status updates."""
 		if not self.has_permission("write"):
@@ -150,3 +149,12 @@ class WhatsAppAccount(Document):
 			"whatsapp_account": self.name,
 		}).insert(ignore_permissions=True)
 		return {"name": message.name, "message_id": message_id}
+
+
+@frappe.whitelist()
+def send_template_test(account_name, to, parent_name, student_name, lesson_date, lesson_time):
+	"""Whitelisted RPC entry point for the lesson_reminder account test."""
+	account = frappe.get_doc("WhatsApp Account", account_name)
+	if not account.has_permission("write"):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+	return account.send_template_test(to, parent_name, student_name, lesson_date, lesson_time)

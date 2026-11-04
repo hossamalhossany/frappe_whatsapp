@@ -16,10 +16,9 @@ frappe.ui.form.on("WhatsApp Account", {
 					],
 					primary_action_label: __("Send test"),
 					primary_action(values) {
-						frm.call({
-							doc: frm.doc,
-							method: "send_template_test",
-							args: values,
+						frappe.call({
+							method: "frappe_whatsapp.frappe_whatsapp.doctype.whatsapp_account.whatsapp_account.send_template_test",
+							args: { account_name: frm.doc.name, ...values },
 							freeze: true,
 							freeze_message: __("Sending WhatsApp template..."),
 							callback(r) {
